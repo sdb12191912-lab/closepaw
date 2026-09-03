@@ -2,24 +2,29 @@ package ai.closepaw.llm.gguf
 
 import android.content.Context
 import android.net.Uri
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Core engine for running GGUF LLMs via llama.cpp JNI.
- * Keeps the ParcelFileDescriptor alive for the entire model lifetime so
- * /proc/self/fd/<fd> remains valid while llama.cpp mmaps the model.
+ *
+ * For SAF/content:// URIs we stage the selected GGUF into app-private storage
+ * before handing it to llama.cpp. Loading through /proc/self/fd/<fd> is not
+ * reliable on all Android storage providers because llama_model_load_from_file()
+ * expects a normal seekable file path that it can mmap.
  */
 class GgufLlmEngine(private val context: Context) {
 
     private var currentModelHandle: Long = 0L
     private var currentModelUri: Uri? = null
-    private var currentModelPfd: ParcelFileDescriptor? = null
+    private var stagedModelFile: File? = null
 
     companion object {
         private const val TAG = "GgufLlmEngine"
+        private const val STAGED_MODEL_NAME = "selected-model.gguf"
     }
 
     init {
@@ -41,14 +46,12 @@ class GgufLlmEngine(private val context: Context) {
         try {
             unloadModel()
 
-            val filePath: String
-            if (uri.scheme == "file") {
-                filePath = uri.path ?: return@withContext false
+            val filePath = if (uri.scheme == "file") {
+                uri.path ?: return@withContext false
             } else {
-                val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-                    ?: return@withContext false
-                currentModelPfd = pfd
-                filePath = "/proc/self/fd/${pfd.fd}"
+                val stagedFile = stageContentUriToPrivateFile(uri) ?: return@withContext false
+                stagedModelFile = stagedFile
+                stagedFile.absolutePath
             }
 
             Log.i(TAG, "Loading model from path: $filePath")
@@ -64,19 +67,53 @@ class GgufLlmEngine(private val context: Context) {
                 Log.i(TAG, "Successfully loaded GGUF model handle: $handle")
                 true
             } else {
-                currentModelPfd?.close()
-                currentModelPfd = null
                 Log.e(TAG, "nativeLoadModelFromFilePath returned 0 handle")
                 false
             }
         } catch (e: Exception) {
-            try {
-                currentModelPfd?.close()
-            } catch (_: Exception) {
-            }
-            currentModelPfd = null
             Log.e(TAG, "Exception loading GGUF model", e)
             false
+        }
+    }
+
+    private fun stageContentUriToPrivateFile(uri: Uri): File? {
+        val modelDir = File(context.filesDir, "gguf")
+        if (!modelDir.exists() && !modelDir.mkdirs()) {
+            Log.e(TAG, "Failed to create GGUF staging directory: ${modelDir.absolutePath}")
+            return null
+        }
+
+        val destination = File(modelDir, STAGED_MODEL_NAME)
+        val temp = File(modelDir, "$STAGED_MODEL_NAME.tmp")
+
+        return try {
+            Log.i(TAG, "Copying SAF model into app-private storage: ${destination.absolutePath}")
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(temp).use { output ->
+                    input.copyTo(output, bufferSize = 1024 * 1024)
+                    output.fd.sync()
+                }
+            } ?: run {
+                Log.e(TAG, "ContentResolver.openInputStream returned null for $uri")
+                temp.delete()
+                return null
+            }
+
+            if (destination.exists() && !destination.delete()) {
+                Log.w(TAG, "Could not delete previous staged model; attempting overwrite by rename")
+            }
+            if (!temp.renameTo(destination)) {
+                Log.e(TAG, "Failed to move staged GGUF into final path")
+                temp.delete()
+                return null
+            }
+
+            Log.i(TAG, "Finished staging GGUF (${destination.length()} bytes)")
+            destination
+        } catch (e: Exception) {
+            temp.delete()
+            Log.e(TAG, "Failed to stage SAF GGUF into private storage", e)
+            null
         }
     }
 
@@ -108,13 +145,6 @@ class GgufLlmEngine(private val context: Context) {
             currentModelHandle = 0L
             currentModelUri = null
             Log.i(TAG, "Unloaded GGUF model handle: $handle")
-        }
-        try {
-            currentModelPfd?.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to close model ParcelFileDescriptor", e)
-        } finally {
-            currentModelPfd = null
         }
     }
 
