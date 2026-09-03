@@ -7,13 +7,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -78,11 +75,14 @@ fun GgufDiagnosticPage(
         }
     }
 
+    // The parent LLM settings page is already vertically scrollable. Keeping another
+    // verticalScroll() here makes Compose measure this child with an infinite height
+    // and crashes at runtime. This page therefore renders as regular content inside
+    // the parent's scroll container.
     Column(
         modifier = modifier
-            .fillMaxSize()
+            .fillMaxWidth()
             .padding(16.dp)
-            .verticalScroll(rememberScrollState())
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(onClick = onNavigateBack) { Text("Back") }
