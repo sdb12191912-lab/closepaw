@@ -28,16 +28,19 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "ndk;26.1.10909125" "cmake;3.22.1"
 
-      - name: Install Vulkan shader compiler
+      - name: Install Vulkan build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslc
+          sudo apt-get install -y glslc libvulkan-dev
           glslc --version
+          test -f /usr/include/vulkan/vulkan.hpp
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build Debug APK
+        env:
+          CPLUS_INCLUDE_PATH: /usr/include
         run: ./gradlew assembleDebug
 
       - name: Upload Debug APK Artifact
