@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -60,13 +61,6 @@ import kotlin.coroutines.CoroutineContext
 
 enum class LlmAuthTab { SIGN_IN, API_KEY, LOCAL }
 
-/**
- * Surface the Local tab in LLM & Authentication settings.
- *
- * Enabled on the GGUF test branch so the new local GGUF diagnostics are actually
- * reachable on-device. The existing LOCAL_LFM path remains intact; the GGUF entry
- * card is shown alongside it for diagnostics only.
- */
 private const val LOCAL_TAB_ENABLED = true
 
 private val VISIBLE_TABS: List<LlmAuthTab> =
@@ -95,7 +89,6 @@ private fun AuthMode.toTab(): LlmAuthTab = when (this) {
     AuthMode.Local -> LlmAuthTab.LOCAL
 }
 
-/** Default provider per tab when the current selected model's mode doesn't match the tab. */
 private val LlmAuthTab.defaultProvider: LLMProvider
     get() = when (this) {
         LlmAuthTab.SIGN_IN -> LLMProvider.OPENAI_CODEX
@@ -103,7 +96,6 @@ private val LlmAuthTab.defaultProvider: LLMProvider
         LlmAuthTab.LOCAL -> LLMProvider.LOCAL_LFM
     }
 
-/** Providers available in the API Key tab sub-selector. */
 private val API_KEY_PROVIDERS = listOf(LLMProvider.OPENAI_API, LLMProvider.OPENROUTER, LLMProvider.OTHER)
 
 @Composable
@@ -155,13 +147,7 @@ internal fun LlmAuthSettingsPage(
     fun commitSignIn(action: () -> Unit) {
         onBackendChange(LLMBackendType.OPENAI)
         val target = resolveProviderForTab(LlmAuthTab.SIGN_IN, selectedModel, modelCatalog)
-        canonicalizeMainModel(
-            modelCatalog = modelCatalog,
-            provider = target,
-            api = null,
-            selectedModel = selectedModel,
-            onModelChange = onModelChange
-        )
+        canonicalizeMainModel(modelCatalog, target, null, selectedModel, onModelChange)
         action()
     }
 
@@ -180,11 +166,7 @@ internal fun LlmAuthSettingsPage(
 
         TabRow(selectedTabIndex = VISIBLE_TABS.indexOf(activeTab).coerceAtLeast(0)) {
             VISIBLE_TABS.forEach { tab ->
-                Tab(
-                    selected = activeTab == tab,
-                    onClick = { selectedTab = tab },
-                    text = { Text(tab.label) }
-                )
+                Tab(selected = activeTab == tab, onClick = { selectedTab = tab }, text = { Text(tab.label) })
             }
         }
 
@@ -202,10 +184,7 @@ internal fun LlmAuthSettingsPage(
                     openAiAuthUiState = openAiAuthUiState,
                     onStartOAuth = { commitSignIn { onStartOAuth() } },
                     onCancelOAuth = onCancelOAuth,
-                    onSignOut = {
-                        scope.launch { authStore.clear(LLMProvider.OPENAI_CODEX) }
-                        onSignOut()
-                    }
+                    onSignOut = { scope.launch { authStore.clear(LLMProvider.OPENAI_CODEX) }; onSignOut() }
                 )
                 LlmAuthTab.API_KEY -> ApiKeyTabContent(
                     selectedModel = selectedModel,
@@ -217,25 +196,10 @@ internal fun LlmAuthSettingsPage(
                     otherModelId = otherModelId,
                     onApiKeyPersist = { provider, key ->
                         commitApiKey { }
-                        launchDebouncedApiKeyPersist(
-                            scope = scope,
-                            authStore = authStore,
-                            mutex = apiKeyPersistMutex,
-                            pending = pendingApiKeyPersist,
-                            provider = provider,
-                            key = key,
-                        )
+                        launchDebouncedApiKeyPersist(scope, authStore, apiKeyPersistMutex, pendingApiKeyPersist, provider, key)
                     },
-                    onOtherBaseUrlPersist = { url ->
-                        launchDebouncedPersist(scope, pendingOtherBaseUrlPersist) {
-                            onOtherBaseUrlChange(url)
-                        }
-                    },
-                    onOtherModelIdPersist = { modelId ->
-                        launchDebouncedPersist(scope, pendingOtherModelIdPersist) {
-                            onOtherModelIdChange(modelId)
-                        }
-                    },
+                    onOtherBaseUrlPersist = { url -> launchDebouncedPersist(scope, pendingOtherBaseUrlPersist) { onOtherBaseUrlChange(url) } },
+                    onOtherModelIdPersist = { modelId -> launchDebouncedPersist(scope, pendingOtherModelIdPersist) { onOtherModelIdChange(modelId) } },
                 )
                 LlmAuthTab.LOCAL -> LocalTabContent(
                     selectedLocalModel = selectedLocalModel,
@@ -249,14 +213,9 @@ internal fun LlmAuthSettingsPage(
     }
 }
 
-private fun resolveProviderForTab(
-    tab: LlmAuthTab,
-    selectedModel: String,
-    modelCatalog: ModelCatalog,
-): LLMProvider {
+private fun resolveProviderForTab(tab: LlmAuthTab, selectedModel: String, modelCatalog: ModelCatalog): LLMProvider {
     val modelProvider = modelCatalog.resolveOrNull(selectedModel)?.provider
-    return if (modelProvider != null && modelProvider.mode == tab.mode) modelProvider
-    else tab.defaultProvider
+    return if (modelProvider != null && modelProvider.mode == tab.mode) modelProvider else tab.defaultProvider
 }
 
 private const val API_KEY_PERSIST_DEBOUNCE_MS = 300L
@@ -276,8 +235,7 @@ internal fun launchDebouncedApiKeyPersist(
         delay(debounceMs)
         mutex.withLock {
             withContext(ioContext) {
-                if (key.isBlank()) authStore.clear(provider)
-                else authStore.set(provider, AuthCredential.ApiKey(key))
+                if (key.isBlank()) authStore.clear(provider) else authStore.set(provider, AuthCredential.ApiKey(key))
             }
         }
     }
@@ -290,10 +248,7 @@ internal fun launchDebouncedPersist(
     action: suspend () -> Unit,
 ) {
     pending[0]?.cancel()
-    pending[0] = scope.launch {
-        delay(debounceMs)
-        action()
-    }
+    pending[0] = scope.launch { delay(debounceMs); action() }
 }
 
 @Composable
@@ -308,22 +263,10 @@ private fun SignInTabContent(
 ) {
     val provider = resolveProviderForTab(LlmAuthTab.SIGN_IN, selectedModel, modelCatalog)
     val modelOptions = catalogModelOptions(modelCatalog.modelsFor(provider))
-
-    SettingsSection(title = "Cloud Model") {
-        CloudModelDropdown(
-            selectedModel = selectedModel,
-            modelOptions = modelOptions,
-            onModelChange = onModelChange
-        )
-    }
+    SettingsSection(title = "Cloud Model") { CloudModelDropdown(selectedModel, modelOptions, onModelChange) }
     Spacer(modifier = Modifier.height(20.dp))
     SettingsSection(title = "Authentication") {
-        OpenAiAuthCard(
-            state = openAiAuthUiState,
-            onStartOAuth = onStartOAuth,
-            onCancelOAuth = onCancelOAuth,
-            onSignOut = onSignOut
-        )
+        OpenAiAuthCard(state = openAiAuthUiState, onStartOAuth = onStartOAuth, onCancelOAuth = onCancelOAuth, onSignOut = onSignOut)
     }
 }
 
@@ -343,17 +286,11 @@ private fun ApiKeyTabContent(
 ) {
     val derivedProvider = resolveProviderForTab(LlmAuthTab.API_KEY, selectedModel, modelCatalog)
     var selectedProvider by rememberSaveable(derivedProvider, initialProvider) {
-        val start = initialProvider?.takeIf { it in API_KEY_PROVIDERS } ?: derivedProvider
-        mutableStateOf(start)
+        mutableStateOf(initialProvider?.takeIf { it in API_KEY_PROVIDERS } ?: derivedProvider)
     }
-
     val modelOptions = catalogModelOptions(modelCatalog.modelsFor(selectedProvider))
     var apiKeyText by remember(selectedProvider) { mutableStateOf("") }
-    LaunchedEffect(selectedProvider) {
-        val cred = authStore.get(selectedProvider)
-        apiKeyText = (cred as? AuthCredential.ApiKey)?.key.orEmpty()
-    }
-
+    LaunchedEffect(selectedProvider) { apiKeyText = (authStore.get(selectedProvider) as? AuthCredential.ApiKey)?.key.orEmpty() }
     var otherBaseUrlText by remember(otherBaseUrl) { mutableStateOf(otherBaseUrl) }
     var otherModelIdText by remember(otherModelId) { mutableStateOf(otherModelId) }
 
@@ -365,46 +302,26 @@ private fun ApiKeyTabContent(
                     onClick = { selectedProvider = provider },
                     shape = SegmentedButtonDefaults.itemShape(index = index, count = API_KEY_PROVIDERS.size),
                     icon = {},
-                ) {
-                    Text(provider.displayLabel)
-                }
+                ) { Text(provider.displayLabel) }
             }
         }
     }
-
     Spacer(modifier = Modifier.height(20.dp))
 
     if (selectedProvider == LLMProvider.OTHER) {
         SettingsSection(title = "Base URL") {
-            OtherBaseUrlField(
-                value = otherBaseUrlText,
-                onValueChange = { value ->
-                    otherBaseUrlText = value
-                    onOtherBaseUrlPersist(value)
-                },
-            )
+            OtherBaseUrlField(otherBaseUrlText) { value -> otherBaseUrlText = value; onOtherBaseUrlPersist(value) }
         }
         Spacer(modifier = Modifier.height(20.dp))
-
         SettingsSection(title = "Custom Model Id") {
-            OtherModelIdField(
-                value = otherModelIdText,
-                onValueChange = { value ->
-                    otherModelIdText = value
-                    onOtherModelIdPersist(value)
-                },
-            )
+            OtherModelIdField(otherModelIdText) { value -> otherModelIdText = value; onOtherModelIdPersist(value) }
         }
         Spacer(modifier = Modifier.height(20.dp))
     }
 
     SettingsSection(title = "Cloud Model") {
         if (selectedProvider == LLMProvider.OPENROUTER || selectedProvider == LLMProvider.OTHER) {
-            SearchableGroupedModelPicker(
-                entries = modelCatalog.modelsFor(selectedProvider),
-                selectedName = selectedModel,
-                onSelect = onModelChange,
-            )
+            SearchableGroupedModelPicker(entries = modelCatalog.modelsFor(selectedProvider), selectedName = selectedModel, onSelect = onModelChange)
             Spacer(modifier = Modifier.height(8.dp))
             val pickerContext = LocalContext.current
             val repo = remember(pickerContext) { ModelCatalogRepositoryHolder.get(pickerContext) }
@@ -422,16 +339,11 @@ private fun ApiKeyTabContent(
                         LLMProvider.OTHER -> OtherBaseUrlValidator.validate(otherBaseUrlText).getOrNull().orEmpty()
                         else -> ""
                     }
-                    if (baseUrl.isBlank()) return@RefreshModelsRow
-                    refreshScope.launch { repo.refresh(selectedProvider, apiKeyText, baseUrl) }
+                    if (baseUrl.isNotBlank()) refreshScope.launch { repo.refresh(selectedProvider, apiKeyText, baseUrl) }
                 },
             )
         } else {
-            CloudModelDropdown(
-                selectedModel = selectedModel,
-                modelOptions = modelOptions,
-                onModelChange = onModelChange
-            )
+            CloudModelDropdown(selectedModel, modelOptions, onModelChange)
         }
     }
     Spacer(modifier = Modifier.height(20.dp))
@@ -444,27 +356,12 @@ private fun ApiKeyTabContent(
             LLMProvider.OPENAI_CODEX, LLMProvider.LOCAL_LFM -> null
         }
         if (label != null) {
-            ApiKeyField(
-                label = label,
-                value = apiKeyText,
-                onValueChange = { key ->
-                    apiKeyText = key
-                    onApiKeyPersist(selectedProvider, key)
-                }
-            )
+            ApiKeyField(label = label, value = apiKeyText, onValueChange = { key -> apiKeyText = key; onApiKeyPersist(selectedProvider, key) })
         }
     }
 
     LaunchedEffect(selectedProvider, otherBaseUrlText, otherModelIdText, apiKeyText, modelCatalog, selectedModel) {
-        if (shouldAutoFlipToOtherCustom(
-                selectedProvider = selectedProvider,
-                apiKeyText = apiKeyText,
-                otherBaseUrlText = otherBaseUrlText,
-                otherModelIdText = otherModelIdText,
-                modelCatalog = modelCatalog,
-                selectedModel = selectedModel,
-            )
-        ) {
+        if (shouldAutoFlipToOtherCustom(selectedProvider, apiKeyText, otherBaseUrlText, otherModelIdText, modelCatalog, selectedModel)) {
             onModelChange(ModelCatalogRepository.OTHER_CUSTOM_NAME)
         }
     }
@@ -478,15 +375,12 @@ internal fun shouldAutoFlipToOtherCustom(
     modelCatalog: ModelCatalog,
     selectedModel: String,
 ): Boolean {
-    if (selectedProvider != LLMProvider.OTHER) return false
-    if (apiKeyText.isBlank()) return false
-    if (otherBaseUrlText.isBlank() || otherModelIdText.isBlank()) return false
+    if (selectedProvider != LLMProvider.OTHER || apiKeyText.isBlank() || otherBaseUrlText.isBlank() || otherModelIdText.isBlank()) return false
     val normalizedUrl = OtherBaseUrlValidator.validate(otherBaseUrlText).getOrNull() ?: return false
     val trimmedModelId = ModelIdValidator.validate(otherModelIdText).getOrNull() ?: return false
     val entry = modelCatalog.resolveOrNull(ModelCatalogRepository.OTHER_CUSTOM_NAME) ?: return false
     if (entry.baseUrl != normalizedUrl || entry.modelId != trimmedModelId) return false
-    if (selectedModel == ModelCatalogRepository.OTHER_CUSTOM_NAME) return false
-    return true
+    return selectedModel != ModelCatalogRepository.OTHER_CUSTOM_NAME
 }
 
 @Composable
@@ -495,7 +389,32 @@ private fun LocalTabContent(
     onLocalModelChange: (LocalModelOption) -> Unit,
     modelLoadingStatus: ModelLoadingStatus
 ) {
-    GgufDiagnosticsEntryCard()
+    val context = LocalContext.current
+    var showGgufDiagnostics by rememberSaveable { mutableStateOf(false) }
+
+    if (showGgufDiagnostics) {
+        val settingsStore = remember(context) { ai.closepaw.llm.gguf.GgufSettingsStore(context) }
+        val engine = remember(context) { ai.closepaw.llm.gguf.GgufLlmEngine(context) }
+        GgufDiagnosticPage(
+            settingsStore = settingsStore,
+            engine = engine,
+            onNavigateBack = { showGgufDiagnostics = false },
+            modifier = Modifier.fillMaxWidth()
+        )
+        return
+    }
+
+    SettingsSection(title = "GGUF diagnostics") {
+        Column(verticalArrangement = Arrangement.spacedBy(MaterialTheme.closePaw.spacing.sm)) {
+            Text(
+                text = "Test a local GGUF model with the embedded llama.cpp engine.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Button(onClick = { showGgufDiagnostics = true }) {
+                Text("Open GGUF Diagnostic UI")
+            }
+        }
+    }
     Spacer(modifier = Modifier.height(20.dp))
 
     Surface(
@@ -504,8 +423,7 @@ private fun LocalTabContent(
         shape = MaterialTheme.shapes.medium
     ) {
         Text(
-            text = "Experimental: local models are slow and underpowered, " +
-                "and will not reliably drive the agent. Use a cloud model for real work.",
+            text = "Experimental: local models are slow and underpowered, and will not reliably drive the agent. Use a cloud model for real work.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onErrorContainer,
             modifier = Modifier.padding(MaterialTheme.closePaw.spacing.md)
@@ -514,10 +432,7 @@ private fun LocalTabContent(
     Spacer(modifier = Modifier.height(16.dp))
     SettingsSection(title = "Local Model") {
         Column(verticalArrangement = Arrangement.spacedBy(MaterialTheme.closePaw.spacing.md)) {
-            LocalModelDropdown(
-                selectedModelId = selectedLocalModel,
-                onModelChange = onLocalModelChange
-            )
+            LocalModelDropdown(selectedModelId = selectedLocalModel, onModelChange = onLocalModelChange)
             ModelLoadingStatusIndicator(status = modelLoadingStatus)
         }
     }
@@ -532,10 +447,7 @@ private fun canonicalizeMainModel(
 ) {
     val validModels = modelCatalog.modelsFor(provider, api)
     val validNames = validModels.map { it.name }.toSet()
-    if (selectedModel !in validNames) {
-        val preferred = validModels.firstOrNull()
-        if (preferred != null) onModelChange(preferred.name)
-    }
+    if (selectedModel !in validNames) validModels.firstOrNull()?.let { onModelChange(it.name) }
 }
 
 @Composable
@@ -548,9 +460,12 @@ private fun OtherBaseUrlField(value: String, onValueChange: (String) -> Unit) {
         label = { Text("Base URL") },
         placeholder = { Text("https://api.example.com/v1") },
         isError = error != null,
-        supportingText = if (error != null) ({ Text(error) }) else null,
-        colors = OutlinedTextFieldDefaults.colors(),
+        supportingText = { if (error != null) Text(error) },
         singleLine = true,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = MaterialTheme.colorScheme.primary,
+            focusedLabelColor = MaterialTheme.colorScheme.primary,
+        ),
     )
 }
 
@@ -562,10 +477,13 @@ private fun OtherModelIdField(value: String, onValueChange: (String) -> Unit) {
         onValueChange = onValueChange,
         modifier = Modifier.fillMaxWidth(),
         label = { Text("Custom Model Id") },
-        placeholder = { Text("model-name") },
+        placeholder = { Text("model-id") },
         isError = error != null,
-        supportingText = if (error != null) ({ Text(error) }) else null,
-        colors = OutlinedTextFieldDefaults.colors(),
+        supportingText = { if (error != null) Text(error) },
         singleLine = true,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = MaterialTheme.colorScheme.primary,
+            focusedLabelColor = MaterialTheme.colorScheme.primary,
+        ),
     )
 }
