@@ -180,7 +180,7 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeGenerate(
     int max_gen = maxTokens > 0 ? maxTokens : 512;
 
     while (n_tokens_generated < max_gen && !handle->stop_requested) {
-        const llama_token id = llama_sampler_sample(smpl, handle->ctx, -1);
+        llama_token id = llama_sampler_sample(smpl, handle->ctx, -1);
 
         if (llama_vocab_is_eog(handle->vocab, id)) {
             LOGI("EOG token reached, generation complete");
