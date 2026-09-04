@@ -36,6 +36,15 @@ jobs:
           test -f /usr/include/vulkan/vulkan.hpp
           test -f /usr/include/vk_video/vulkan_video_codec_h264std.h
 
+      - name: Use NDK glslc for llama.cpp Vulkan shaders
+        run: |
+          NDK_GLSLC="$ANDROID_HOME/ndk/26.1.10909125/shader-tools/linux-x86_64/glslc"
+          test -x "$NDK_GLSLC"
+          "$NDK_GLSLC" --version
+          sudo ln -sf "$NDK_GLSLC" /usr/local/bin/glslc
+          command -v glslc
+          glslc --version
+
       - name: Stage Vulkan headers into Android NDK sysroot
         run: |
           NDK_SYSROOT="$ANDROID_HOME/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
