@@ -5,9 +5,9 @@ import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
-import kotlin.math.max
 
 /**
  * Core engine for running GGUF LLMs via llama.cpp JNI.
@@ -20,12 +20,18 @@ import kotlin.math.max
 class GgufLlmEngine(private val context: Context) {
 
     data class InferenceMetrics(
-        val elapsedMs: Long,
-        val outputTokensEstimate: Int,
-        val tokensPerSecondEstimate: Double,
-        val gpuOffloadRequested: Boolean = true,
+        val loadMs: Long = 0L,
+        val promptMs: Long = 0L,
+        val ttftMs: Long = -1L,
+        val totalMs: Long = 0L,
+        val promptTokens: Int = 0,
+        val generatedTokens: Int = 0,
+        val promptTokensPerSecond: Double = 0.0,
+        val generationTokensPerSecond: Double = 0.0,
         val gpuLayersRequested: Int = 999,
-        val flashAttentionRequested: Boolean = true
+        val gpuOffloadRequested: Boolean = true,
+        val flashAttentionRequested: Boolean = true,
+        val backendNote: String = ""
     )
 
     data class GenerationResult(
@@ -141,31 +147,45 @@ class GgufLlmEngine(private val context: Context) {
             if (handle == 0L) {
                 return@withContext GenerationResult(
                     text = "[Error: Model not loaded in GgufLlmEngine]",
-                    metrics = InferenceMetrics(0L, 0, 0.0)
+                    metrics = InferenceMetrics()
                 )
             }
 
             val formattedPrompt = buildQwenChatPrompt(prompt)
-            val startNs = System.nanoTime()
             val text = try {
                 GgufNativeBridge.nativeGenerate(handle, formattedPrompt, maxTokens)
             } catch (e: Exception) {
                 Log.e(TAG, "Exception during GGUF generate", e)
                 "[Error during generation: ${e.message}]"
             }
-            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
-            val tokenEstimate = estimateTokenCount(text)
-            val tokPerSecond = if (elapsedMs > 0L) tokenEstimate * 1000.0 / elapsedMs else 0.0
 
-            GenerationResult(
-                text = text,
-                metrics = InferenceMetrics(
-                    elapsedMs = elapsedMs,
-                    outputTokensEstimate = tokenEstimate,
-                    tokensPerSecondEstimate = tokPerSecond
-                )
-            )
+            val metrics = try {
+                parseNativeMetrics(GgufNativeBridge.nativeGetLastMetricsJson(handle))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to read native GGUF metrics", e)
+                InferenceMetrics()
+            }
+
+            GenerationResult(text = text, metrics = metrics)
         }
+
+    private fun parseNativeMetrics(json: String): InferenceMetrics {
+        val obj = JSONObject(json)
+        return InferenceMetrics(
+            loadMs = obj.optLong("load_ms", 0L),
+            promptMs = obj.optLong("prompt_ms", 0L),
+            ttftMs = obj.optLong("ttft_ms", -1L),
+            totalMs = obj.optLong("total_ms", 0L),
+            promptTokens = obj.optInt("prompt_tokens", 0),
+            generatedTokens = obj.optInt("generated_tokens", 0),
+            promptTokensPerSecond = obj.optDouble("prompt_tps", 0.0),
+            generationTokensPerSecond = obj.optDouble("generation_tps", 0.0),
+            gpuLayersRequested = obj.optInt("gpu_layers_requested", 999),
+            gpuOffloadRequested = obj.optBoolean("offload_kqv_requested", true),
+            flashAttentionRequested = obj.optBoolean("flash_attn_requested", true),
+            backendNote = obj.optString("backend_note", "")
+        )
+    }
 
     private fun buildQwenChatPrompt(userPrompt: String): String = buildString {
         append("<|im_start|>system\n")
@@ -175,12 +195,6 @@ class GgufLlmEngine(private val context: Context) {
         append(userPrompt.trim())
         append("\n<|im_end|>\n")
         append("<|im_start|>assistant\n")
-    }
-
-    private fun estimateTokenCount(text: String): Int {
-        if (text.isBlank()) return 0
-        val bytes = text.toByteArray(Charsets.UTF_8).size
-        return max(1, bytes / 4)
     }
 
     fun stopGeneration() {
