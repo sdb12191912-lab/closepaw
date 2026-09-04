@@ -34,6 +34,7 @@ import ai.closepaw.llm.gguf.GgufLocalConfig
 import ai.closepaw.llm.gguf.GgufNativeBridge
 import ai.closepaw.llm.gguf.GgufSettingsStore
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 @Composable
 fun GgufDiagnosticPage(
@@ -52,6 +53,7 @@ fun GgufDiagnosticPage(
     var isGenerating by remember { mutableStateOf(false) }
     var testPrompt by remember { mutableStateOf("Answer with exactly: OK") }
     var testOutput by remember { mutableStateOf("") }
+    var metrics by remember { mutableStateOf<GgufLlmEngine.InferenceMetrics?>(null) }
 
     val safPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -75,10 +77,6 @@ fun GgufDiagnosticPage(
         }
     }
 
-    // The parent LLM settings page is already vertically scrollable. Keeping another
-    // verticalScroll() here makes Compose measure this child with an infinite height
-    // and crashes at runtime. This page therefore renders as regular content inside
-    // the parent's scroll container.
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -88,7 +86,7 @@ fun GgufDiagnosticPage(
             OutlinedButton(onClick = onNavigateBack) { Text("Back") }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "GGUF llama.cpp Engine Diagnostic",
+                text = "ClosePaw GGUF Diagnostic",
                 style = MaterialTheme.typography.titleLarge
             )
         }
@@ -104,6 +102,8 @@ fun GgufDiagnosticPage(
                 Text("JNI Library Loaded: ${GgufNativeBridge.isNativeLibraryLoaded()}")
                 Text("Llama Version: ${engine.getSystemInfo()}")
                 Text("Engine Model Loaded: $isEngineLoaded")
+                Text("GPU offload requested: yes (999 layers)")
+                Text("Flash Attention requested: yes")
                 Text("Status: $statusText")
             }
         }
@@ -129,6 +129,7 @@ fun GgufDiagnosticPage(
                             settingsStore.clear()
                             engine.unloadModel()
                             isEngineLoaded = false
+                            metrics = null
                             statusText = "Cleared model selection"
                         }
                     ) {
@@ -172,6 +173,7 @@ fun GgufDiagnosticPage(
                         onClick = {
                             engine.unloadModel()
                             isEngineLoaded = engine.isModelLoaded()
+                            metrics = null
                             statusText = "Model unloaded"
                         }
                     ) {
@@ -204,9 +206,11 @@ fun GgufDiagnosticPage(
                         onClick = {
                             isGenerating = true
                             testOutput = "Generating..."
+                            metrics = null
                             scope.launch {
-                                val result = engine.generate(testPrompt, maxTokens = 128)
-                                testOutput = result
+                                val result = engine.generateWithMetrics(testPrompt, maxTokens = 16)
+                                testOutput = result.text
+                                metrics = result.metrics
                                 isGenerating = false
                             }
                         }
@@ -223,6 +227,22 @@ fun GgufDiagnosticPage(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("Output:", style = MaterialTheme.typography.labelLarge)
                 Text(text = testOutput, style = MaterialTheme.typography.bodyMedium)
+
+                metrics?.let { m ->
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Performance", style = MaterialTheme.typography.labelLarge)
+                    Text("Elapsed: ${m.elapsedMs} ms")
+                    Text("Estimated output tokens: ${m.outputTokensEstimate}")
+                    Text(
+                        "Estimated speed: ${String.format(Locale.US, "%.2f", m.tokensPerSecondEstimate)} tok/s"
+                    )
+                    Text("GPU layers requested: ${m.gpuLayersRequested}")
+                    Text("GPU offload requested: ${m.gpuOffloadRequested}")
+                    Text("Flash Attention requested: ${m.flashAttentionRequested}")
+                    Text(
+                        "Note: tok/s is estimated in Kotlin; exact native prompt/TTFT/gen timings remain in logcat."
+                    )
+                }
             }
         }
     }
