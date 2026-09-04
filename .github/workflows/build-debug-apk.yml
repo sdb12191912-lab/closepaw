@@ -45,6 +45,14 @@ jobs:
           command -v glslc
           glslc --version
 
+      - name: Disable unsupported cooperative-matrix shader probe
+        run: |
+          SHADER_TEST="third_party/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/test_coopmat_support.comp"
+          cat > "$SHADER_TEST" <<'EOF'
+          #version 460
+          #error GGML coopmat probe disabled for Android NDK r26 glslc
+          EOF
+
       - name: Stage Vulkan headers into Android NDK sysroot
         run: |
           NDK_SYSROOT="$ANDROID_HOME/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
