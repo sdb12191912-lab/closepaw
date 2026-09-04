@@ -39,6 +39,8 @@ object GgufNativeBridge {
         maxTokens: Int
     ): String
 
+    external fun nativeGetLastMetricsJson(handle: Long): String
+
     external fun nativeStopGeneration(handle: Long)
     external fun nativeFreeModel(handle: Long)
 }
