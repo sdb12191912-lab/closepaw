@@ -17,7 +17,7 @@ android {
     ndkVersion = "26.1.10909125"
 
     defaultConfig {
-        applicationId = "ai.closepaw"
+        applicationId = "ai.closepaw.gguf"
         // Required by LiquidAI Leap SDK for local inference.
         // If we need to support Android < 12, consider a cloud-only flavor.
         minSdk = 31
