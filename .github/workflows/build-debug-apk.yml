@@ -45,13 +45,30 @@ jobs:
           command -v glslc
           glslc --version
 
-      - name: Disable unsupported cooperative-matrix shader probe
+      - name: Patch llama.cpp Vulkan coopmat detection for Android
         run: |
-          SHADER_TEST="third_party/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/test_coopmat_support.comp"
-          cat > "$SHADER_TEST" <<'EOF'
-          #version 460
-          #error GGML coopmat probe disabled for Android NDK r26 glslc
-          EOF
+          CMAKE_FILE="third_party/llama.cpp/ggml/src/ggml-vulkan/CMakeLists.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("third_party/llama.cpp/ggml/src/ggml-vulkan/CMakeLists.txt")
+          text = path.read_text()
+
+          old1 = '''    if (${glslc_error} MATCHES ".*extension not supported: GL_KHR_cooperative_matrix.*")\n        message(STATUS "GL_KHR_cooperative_matrix not supported by glslc")\n    else()\n        message(STATUS "GL_KHR_cooperative_matrix supported by glslc")\n        add_compile_definitions(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)\n    endif()'''
+          new1 = '''    if (ANDROID)\n        message(STATUS "GL_KHR_cooperative_matrix disabled for Android build")\n    elseif (${glslc_error} MATCHES ".*extension not supported: GL_KHR_cooperative_matrix.*")\n        message(STATUS "GL_KHR_cooperative_matrix not supported by glslc")\n    else()\n        message(STATUS "GL_KHR_cooperative_matrix supported by glslc")\n        add_compile_definitions(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)\n    endif()'''
+
+          old2 = '''    if (${glslc_error} MATCHES ".*extension not supported: GL_NV_cooperative_matrix2.*")\n        message(STATUS "GL_NV_cooperative_matrix2 not supported by glslc")\n    else()\n        message(STATUS "GL_NV_cooperative_matrix2 supported by glslc")\n        add_compile_definitions(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)\n    endif()'''
+          new2 = '''    if (ANDROID)\n        message(STATUS "GL_NV_cooperative_matrix2 disabled for Android build")\n    elseif (${glslc_error} MATCHES ".*extension not supported: GL_NV_cooperative_matrix2.*")\n        message(STATUS "GL_NV_cooperative_matrix2 not supported by glslc")\n    else()\n        message(STATUS "GL_NV_cooperative_matrix2 supported by glslc")\n        add_compile_definitions(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)\n    endif()'''
+
+          if old1 not in text:
+              raise SystemExit("KHR coopmat detection block not found")
+          if old2 not in text:
+              raise SystemExit("NV coopmat2 detection block not found")
+
+          text = text.replace(old1, new1).replace(old2, new2)
+          path.write_text(text)
+          PY
+          grep -n -A8 -B2 "disabled for Android build" "$CMAKE_FILE"
 
       - name: Stage Vulkan headers into Android NDK sysroot
         run: |
