@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cstring>
 #include <chrono>
+#include <sstream>
+#include <iomanip>
 #include <android/log.h>
 #include "llama.h"
 
@@ -16,7 +18,41 @@ struct GgufModelHandle {
     llama_context * ctx = nullptr;
     const llama_vocab * vocab = nullptr;
     std::atomic<bool> stop_requested{false};
+
+    long long load_ms = 0;
+    long long prompt_ms = 0;
+    long long ttft_ms = -1;
+    long long total_ms = 0;
+    int prompt_tokens = 0;
+    int generated_tokens = 0;
+    double prompt_tps = 0.0;
+    double generation_tps = 0.0;
+    int gpu_layers_requested = 999;
+    bool offload_kqv_requested = true;
+    bool flash_attn_requested = true;
 };
+
+static std::string metrics_json(const GgufModelHandle *handle) {
+    if (!handle) {
+        return "{}";
+    }
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"load_ms\":" << handle->load_ms << ",";
+    ss << "\"prompt_ms\":" << handle->prompt_ms << ",";
+    ss << "\"ttft_ms\":" << handle->ttft_ms << ",";
+    ss << "\"total_ms\":" << handle->total_ms << ",";
+    ss << "\"prompt_tokens\":" << handle->prompt_tokens << ",";
+    ss << "\"generated_tokens\":" << handle->generated_tokens << ",";
+    ss << "\"prompt_tps\":" << std::fixed << std::setprecision(4) << handle->prompt_tps << ",";
+    ss << "\"generation_tps\":" << std::fixed << std::setprecision(4) << handle->generation_tps << ",";
+    ss << "\"gpu_layers_requested\":" << handle->gpu_layers_requested << ",";
+    ss << "\"offload_kqv_requested\":" << (handle->offload_kqv_requested ? "true" : "false") << ",";
+    ss << "\"flash_attn_requested\":" << (handle->flash_attn_requested ? "true" : "false") << ",";
+    ss << "\"backend_note\":\"Requested GPU offload is shown here. Exact tensors/layers accepted by Vulkan must be confirmed from llama.cpp backend logs on this pinned build.\"";
+    ss << "}";
+    return ss.str();
+}
 
 extern "C" {
 
@@ -68,8 +104,6 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeLoadModelFromFilePath(
     const auto load_start = std::chrono::steady_clock::now();
 
     llama_model_params mparams = llama_model_default_params();
-    // Offload as many model layers as the active Vulkan backend can accept.
-    // llama.cpp keeps CPU as a fallback for tensors/ops that cannot be offloaded.
     mparams.n_gpu_layers = 999;
     mparams.main_gpu = 0;
 
@@ -118,10 +152,13 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeLoadModelFromFilePath(
     handle->ctx = ctx;
     handle->vocab = vocab;
     handle->stop_requested = false;
+    handle->gpu_layers_requested = mparams.n_gpu_layers;
+    handle->offload_kqv_requested = cparams.offload_kqv;
+    handle->flash_attn_requested = cparams.flash_attn;
 
     const auto load_end = std::chrono::steady_clock::now();
-    const auto load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(load_end - load_start).count();
-    LOGI("Successfully loaded GGUF model and initialized context in %lld ms", (long long) load_ms);
+    handle->load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(load_end - load_start).count();
+    LOGI("Successfully loaded GGUF model and initialized context in %lld ms", handle->load_ms);
     return reinterpret_cast<jlong>(handle);
 }
 
@@ -148,6 +185,13 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeGenerate(
     }
 
     handle->stop_requested = false;
+    handle->prompt_ms = 0;
+    handle->ttft_ms = -1;
+    handle->total_ms = 0;
+    handle->prompt_tokens = 0;
+    handle->generated_tokens = 0;
+    handle->prompt_tps = 0.0;
+    handle->generation_tps = 0.0;
 
     int prompt_len = strlen(prompt);
     int n_prompt_max = prompt_len + 512;
@@ -183,6 +227,8 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeGenerate(
         return env->NewStringUTF("[Error: Tokenization failed]");
     }
 
+    handle->prompt_tokens = n_prompt;
+
     const auto generation_start = std::chrono::steady_clock::now();
     const auto prompt_decode_start = std::chrono::steady_clock::now();
 
@@ -193,9 +239,9 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeGenerate(
     }
 
     const auto prompt_decode_end = std::chrono::steady_clock::now();
-    const auto prompt_decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prompt_decode_end - prompt_decode_start).count();
-    const double prompt_tps = prompt_decode_ms > 0 ? (1000.0 * n_prompt / (double) prompt_decode_ms) : 0.0;
-    LOGI("Prompt decode: tokens=%d elapsed_ms=%lld tok_s=%.2f", n_prompt, (long long) prompt_decode_ms, prompt_tps);
+    handle->prompt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prompt_decode_end - prompt_decode_start).count();
+    handle->prompt_tps = handle->prompt_ms > 0 ? (1000.0 * n_prompt / (double) handle->prompt_ms) : 0.0;
+    LOGI("Prompt decode: tokens=%d elapsed_ms=%lld tok_s=%.2f", n_prompt, handle->prompt_ms, handle->prompt_tps);
 
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler *smpl = llama_sampler_chain_init(sparams);
@@ -207,7 +253,6 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeGenerate(
     std::string output_text;
     int n_tokens_generated = 0;
     int max_gen = maxTokens > 0 ? maxTokens : 512;
-    long long first_token_ms = -1;
 
     while (n_tokens_generated < max_gen && !handle->stop_requested) {
         const auto token_start = std::chrono::steady_clock::now();
@@ -232,12 +277,13 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeGenerate(
         }
 
         n_tokens_generated++;
+        handle->generated_tokens = n_tokens_generated;
 
         const auto token_end = std::chrono::steady_clock::now();
         const auto token_ms = std::chrono::duration_cast<std::chrono::milliseconds>(token_end - token_start).count();
         if (n_tokens_generated == 1) {
-            first_token_ms = std::chrono::duration_cast<std::chrono::milliseconds>(token_end - generation_start).count();
-            LOGI("First generated token: ttft_ms=%lld", first_token_ms);
+            handle->ttft_ms = std::chrono::duration_cast<std::chrono::milliseconds>(token_end - generation_start).count();
+            LOGI("First generated token: ttft_ms=%lld", handle->ttft_ms);
         }
         LOGI("Generated token %d/%d decode_ms=%lld", n_tokens_generated, max_gen, (long long) token_ms);
     }
@@ -245,17 +291,27 @@ Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeGenerate(
     llama_sampler_free(smpl);
 
     const auto generation_end = std::chrono::steady_clock::now();
-    const auto generation_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generation_end - generation_start).count();
-    const long long decode_only_ms = generation_ms > prompt_decode_ms ? generation_ms - prompt_decode_ms : generation_ms;
-    const double generation_tps = decode_only_ms > 0 ? (1000.0 * n_tokens_generated / (double) decode_only_ms) : 0.0;
+    handle->total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generation_end - generation_start).count();
+    const long long decode_only_ms = handle->total_ms > handle->prompt_ms ? handle->total_ms - handle->prompt_ms : handle->total_ms;
+    handle->generation_tps = decode_only_ms > 0 ? (1000.0 * n_tokens_generated / (double) decode_only_ms) : 0.0;
 
     LOGI("Generation finished. Total tokens generated: %d total_ms=%lld prompt_ms=%lld ttft_ms=%lld gen_tok_s=%.2f",
          n_tokens_generated,
-         (long long) generation_ms,
-         (long long) prompt_decode_ms,
-         first_token_ms,
-         generation_tps);
+         handle->total_ms,
+         handle->prompt_ms,
+         handle->ttft_ms,
+         handle->generation_tps);
     return env->NewStringUTF(output_text.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_ai_closepaw_llm_gguf_GgufNativeBridge_nativeGetLastMetricsJson(
+        JNIEnv *env,
+        jobject /* this */,
+        jlong handlePtr) {
+    GgufModelHandle *handle = reinterpret_cast<GgufModelHandle *>(handlePtr);
+    const std::string json = metrics_json(handle);
+    return env->NewStringUTF(json.c_str());
 }
 
 JNIEXPORT void JNICALL
