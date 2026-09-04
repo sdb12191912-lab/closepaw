@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.max
 
 /**
  * Core engine for running GGUF LLMs via llama.cpp JNI.
@@ -17,6 +18,20 @@ import java.io.FileOutputStream
  * expects a normal seekable file path that it can mmap.
  */
 class GgufLlmEngine(private val context: Context) {
+
+    data class InferenceMetrics(
+        val elapsedMs: Long,
+        val outputTokensEstimate: Int,
+        val tokensPerSecondEstimate: Double,
+        val gpuOffloadRequested: Boolean = true,
+        val gpuLayersRequested: Int = 999,
+        val flashAttentionRequested: Boolean = true
+    )
+
+    data class GenerationResult(
+        val text: String,
+        val metrics: InferenceMetrics
+    )
 
     private var currentModelHandle: Long = 0L
     private var currentModelUri: Uri? = null
@@ -118,18 +133,55 @@ class GgufLlmEngine(private val context: Context) {
     }
 
     suspend fun generate(prompt: String, maxTokens: Int = 256): String =
+        generateWithMetrics(prompt, maxTokens).text
+
+    suspend fun generateWithMetrics(prompt: String, maxTokens: Int = 256): GenerationResult =
         withContext(Dispatchers.Default) {
             val handle = currentModelHandle
             if (handle == 0L) {
-                return@withContext "[Error: Model not loaded in GgufLlmEngine]"
+                return@withContext GenerationResult(
+                    text = "[Error: Model not loaded in GgufLlmEngine]",
+                    metrics = InferenceMetrics(0L, 0, 0.0)
+                )
             }
-            try {
-                GgufNativeBridge.nativeGenerate(handle, prompt, maxTokens)
+
+            val formattedPrompt = buildQwenChatPrompt(prompt)
+            val startNs = System.nanoTime()
+            val text = try {
+                GgufNativeBridge.nativeGenerate(handle, formattedPrompt, maxTokens)
             } catch (e: Exception) {
                 Log.e(TAG, "Exception during GGUF generate", e)
                 "[Error during generation: ${e.message}]"
             }
+            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+            val tokenEstimate = estimateTokenCount(text)
+            val tokPerSecond = if (elapsedMs > 0L) tokenEstimate * 1000.0 / elapsedMs else 0.0
+
+            GenerationResult(
+                text = text,
+                metrics = InferenceMetrics(
+                    elapsedMs = elapsedMs,
+                    outputTokensEstimate = tokenEstimate,
+                    tokensPerSecondEstimate = tokPerSecond
+                )
+            )
         }
+
+    private fun buildQwenChatPrompt(userPrompt: String): String = buildString {
+        append("<|im_start|>system\n")
+        append("You are a concise assistant. Follow the user's instruction exactly.\n")
+        append("<|im_end|>\n")
+        append("<|im_start|>user\n")
+        append(userPrompt.trim())
+        append("\n<|im_end|>\n")
+        append("<|im_start|>assistant\n")
+    }
+
+    private fun estimateTokenCount(text: String): Int {
+        if (text.isBlank()) return 0
+        val bytes = text.toByteArray(Charsets.UTF_8).size
+        return max(1, bytes / 4)
+    }
 
     fun stopGeneration() {
         val handle = currentModelHandle
