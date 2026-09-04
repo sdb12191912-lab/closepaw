@@ -1,21 +1,37 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(closepaw_gguf_jni CXX C)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Build tests" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "Build server" FORCE)
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "Build llama common support" FORCE)
 
-# Android CPU tuning. OpenMP and llamafile are not useful/safe defaults on Android.
+# Android CPU tuning.
 set(GGML_OPENMP OFF CACHE BOOL "Disable OpenMP on Android" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "Disable llamafile kernels on Android" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "Do not pin one host CPU ISA" FORCE)
 
-# Enable Vulkan backend. llama.cpp will still retain the CPU backend and can
-# fall back to CPU when no usable Vulkan device is available at runtime.
+# Match the LocalMind strategy where possible: package multiple CPU backend
+# variants and allow GGML to select the best implementation at runtime.
+# These options are ignored by older llama.cpp revisions that do not expose them.
+set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "Build all Android CPU variants" FORCE)
+set(GGML_BACKEND_DL ON CACHE BOOL "Enable dynamic GGML backend loading" FORCE)
+
+# Vulkan backend. llama.cpp keeps CPU fallback available.
 set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan backend" FORCE)
 set(GGML_VULKAN_CHECK_RESULTS OFF CACHE BOOL "Disable Vulkan validation checks" FORCE)
 set(GGML_VULKAN_DEBUG OFF CACHE BOOL "Disable Vulkan debug output" FORCE)
 set(GGML_VULKAN_VALIDATE OFF CACHE BOOL "Disable Vulkan validation layers" FORCE)
+
+# Release-style native optimisation is useful even in the debug APK used for
+# inference diagnostics. Do not optimise for size (-Os): LLM kernels benefit
+# materially from -O3/SIMD/loop optimisation.
+add_compile_options(-O3 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections)
 
 get_filename_component(LLAMA_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/llama.cpp" ABSOLUTE)
 
@@ -36,5 +52,6 @@ target_include_directories(closepaw_gguf_jni PRIVATE
 
 target_link_libraries(closepaw_gguf_jni PRIVATE
     llama
+    android
     log
 )
