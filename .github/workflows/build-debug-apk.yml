@@ -34,13 +34,16 @@ jobs:
           sudo apt-get install -y glslc libvulkan-dev
           glslc --version
           test -f /usr/include/vulkan/vulkan.hpp
+          test -f /usr/include/vk_video/vulkan_video_codec_h264std.h
 
       - name: Stage Vulkan headers into Android NDK sysroot
         run: |
           NDK_SYSROOT="$ANDROID_HOME/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          sudo mkdir -p "$NDK_SYSROOT/usr/include/vulkan"
+          sudo mkdir -p "$NDK_SYSROOT/usr/include/vulkan" "$NDK_SYSROOT/usr/include/vk_video"
           sudo cp -a /usr/include/vulkan/. "$NDK_SYSROOT/usr/include/vulkan/"
+          sudo cp -a /usr/include/vk_video/. "$NDK_SYSROOT/usr/include/vk_video/"
           test -f "$NDK_SYSROOT/usr/include/vulkan/vulkan.hpp"
+          test -f "$NDK_SYSROOT/usr/include/vk_video/vulkan_video_codec_h264std.h"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
