@@ -102,8 +102,6 @@ fun GgufDiagnosticPage(
                 Text("JNI Library Loaded: ${GgufNativeBridge.isNativeLibraryLoaded()}")
                 Text("Llama Version: ${engine.getSystemInfo()}")
                 Text("Engine Model Loaded: $isEngineLoaded")
-                Text("GPU offload requested: yes (999 layers)")
-                Text("Flash Attention requested: yes")
                 Text("Status: $statusText")
             }
         }
@@ -230,18 +228,20 @@ fun GgufDiagnosticPage(
 
                 metrics?.let { m ->
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text("Performance", style = MaterialTheme.typography.labelLarge)
-                    Text("Elapsed: ${m.elapsedMs} ms")
-                    Text("Estimated output tokens: ${m.outputTokensEstimate}")
-                    Text(
-                        "Estimated speed: ${String.format(Locale.US, "%.2f", m.tokensPerSecondEstimate)} tok/s"
-                    )
+                    Text("Native Performance", style = MaterialTheme.typography.labelLarge)
+                    Text("Model load: ${m.loadMs} ms")
+                    Text("Prompt: ${m.promptTokens} tokens / ${m.promptMs} ms")
+                    Text("Prompt speed: ${String.format(Locale.US, "%.2f", m.promptTokensPerSecond)} tok/s")
+                    Text("TTFT: ${m.ttftMs} ms")
+                    Text("Generated: ${m.generatedTokens} tokens")
+                    Text("Generation speed: ${String.format(Locale.US, "%.2f", m.generationTokensPerSecond)} tok/s")
+                    Text("Total native generation: ${m.totalMs} ms")
                     Text("GPU layers requested: ${m.gpuLayersRequested}")
-                    Text("GPU offload requested: ${m.gpuOffloadRequested}")
+                    Text("KQV offload requested: ${m.gpuOffloadRequested}")
                     Text("Flash Attention requested: ${m.flashAttentionRequested}")
-                    Text(
-                        "Note: tok/s is estimated in Kotlin; exact native prompt/TTFT/gen timings remain in logcat."
-                    )
+                    if (m.backendNote.isNotBlank()) {
+                        Text("Backend: ${m.backendNote}")
+                    }
                 }
             }
         }
