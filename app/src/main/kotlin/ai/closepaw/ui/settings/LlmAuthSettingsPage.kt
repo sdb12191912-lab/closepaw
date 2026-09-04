@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -60,16 +61,7 @@ import kotlin.coroutines.CoroutineContext
 
 enum class LlmAuthTab { SIGN_IN, API_KEY, LOCAL }
 
-/**
- * Surface the Local tab in LLM & Authentication settings.
- *
- * Off because LFM 1.2B Q4 on a phone CPU takes 1-3 min to emit the first tool
- * call with the current 12-tool agent schema — it works, but it's unusable.
- * Flip to true to re-expose once we have a smaller agent-capable model or a
- * chat-only path. The rest of the local stack (LFMLLMClient, auto-download,
- * LocalTabContent) stays wired so flipping this is a one-line change.
- */
-private const val LOCAL_TAB_ENABLED = false
+private const val LOCAL_TAB_ENABLED = true
 
 private val VISIBLE_TABS: List<LlmAuthTab> =
     LlmAuthTab.entries.filter { LOCAL_TAB_ENABLED || it != LlmAuthTab.LOCAL }
@@ -97,7 +89,6 @@ private fun AuthMode.toTab(): LlmAuthTab = when (this) {
     AuthMode.Local -> LlmAuthTab.LOCAL
 }
 
-/** Default provider per tab when the current selected model's mode doesn't match the tab. */
 private val LlmAuthTab.defaultProvider: LLMProvider
     get() = when (this) {
         LlmAuthTab.SIGN_IN -> LLMProvider.OPENAI_CODEX
@@ -105,7 +96,6 @@ private val LlmAuthTab.defaultProvider: LLMProvider
         LlmAuthTab.LOCAL -> LLMProvider.LOCAL_LFM
     }
 
-/** Providers available in the API Key tab sub-selector. */
 private val API_KEY_PROVIDERS = listOf(LLMProvider.OPENAI_API, LLMProvider.OPENROUTER, LLMProvider.OTHER)
 
 @Composable
@@ -131,8 +121,6 @@ internal fun LlmAuthSettingsPage(
     onOtherBaseUrlChange: (String) -> Unit = {},
     onOtherModelIdChange: (String) -> Unit = {},
 ) {
-    // Initial tab: explicit caller request wins; else derive from selected model's provider mode.
-    // When the Local tab is hidden, any LOCAL landing target falls back to API_KEY.
     val modelMode = modelCatalog.resolveOrNull(selectedModel)?.provider?.mode
     var selectedTab by rememberSaveable(initialAuthTab, modelMode, llmBackend) {
         val raw = when {
@@ -151,25 +139,15 @@ internal fun LlmAuthSettingsPage(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val authStore = remember(context) { AuthStoreHolder.get(context) }
-    // Debounce + single-flight + FIFO mutex: cancel any pending write on each
-    // keystroke; the mutex serializes writes that already passed the debounce
-    // so the final keystroke wins even if an earlier write reached AuthStore.
     val pendingApiKeyPersist = remember { arrayOf<Job?>(null) }
     val apiKeyPersistMutex = remember { Mutex() }
     val pendingOtherBaseUrlPersist = remember { arrayOf<Job?>(null) }
     val pendingOtherModelIdPersist = remember { arrayOf<Job?>(null) }
 
-    // Commit wrappers — called on real user actions inside tab content, NOT on tab tap.
     fun commitSignIn(action: () -> Unit) {
         onBackendChange(LLMBackendType.OPENAI)
         val target = resolveProviderForTab(LlmAuthTab.SIGN_IN, selectedModel, modelCatalog)
-        canonicalizeMainModel(
-            modelCatalog = modelCatalog,
-            provider = target,
-            api = null,
-            selectedModel = selectedModel,
-            onModelChange = onModelChange
-        )
+        canonicalizeMainModel(modelCatalog, target, null, selectedModel, onModelChange)
         action()
     }
 
@@ -188,11 +166,7 @@ internal fun LlmAuthSettingsPage(
 
         TabRow(selectedTabIndex = VISIBLE_TABS.indexOf(activeTab).coerceAtLeast(0)) {
             VISIBLE_TABS.forEach { tab ->
-                Tab(
-                    selected = activeTab == tab,
-                    onClick = { selectedTab = tab },
-                    text = { Text(tab.label) }
-                )
+                Tab(selected = activeTab == tab, onClick = { selectedTab = tab }, text = { Text(tab.label) })
             }
         }
 
@@ -210,10 +184,7 @@ internal fun LlmAuthSettingsPage(
                     openAiAuthUiState = openAiAuthUiState,
                     onStartOAuth = { commitSignIn { onStartOAuth() } },
                     onCancelOAuth = onCancelOAuth,
-                    onSignOut = {
-                        scope.launch { authStore.clear(LLMProvider.OPENAI_CODEX) }
-                        onSignOut()
-                    }
+                    onSignOut = { scope.launch { authStore.clear(LLMProvider.OPENAI_CODEX) }; onSignOut() }
                 )
                 LlmAuthTab.API_KEY -> ApiKeyTabContent(
                     selectedModel = selectedModel,
@@ -225,25 +196,10 @@ internal fun LlmAuthSettingsPage(
                     otherModelId = otherModelId,
                     onApiKeyPersist = { provider, key ->
                         commitApiKey { }
-                        launchDebouncedApiKeyPersist(
-                            scope = scope,
-                            authStore = authStore,
-                            mutex = apiKeyPersistMutex,
-                            pending = pendingApiKeyPersist,
-                            provider = provider,
-                            key = key,
-                        )
+                        launchDebouncedApiKeyPersist(scope, authStore, apiKeyPersistMutex, pendingApiKeyPersist, provider, key)
                     },
-                    onOtherBaseUrlPersist = { url ->
-                        launchDebouncedPersist(scope, pendingOtherBaseUrlPersist) {
-                            onOtherBaseUrlChange(url)
-                        }
-                    },
-                    onOtherModelIdPersist = { modelId ->
-                        launchDebouncedPersist(scope, pendingOtherModelIdPersist) {
-                            onOtherModelIdChange(modelId)
-                        }
-                    },
+                    onOtherBaseUrlPersist = { url -> launchDebouncedPersist(scope, pendingOtherBaseUrlPersist) { onOtherBaseUrlChange(url) } },
+                    onOtherModelIdPersist = { modelId -> launchDebouncedPersist(scope, pendingOtherModelIdPersist) { onOtherModelIdChange(modelId) } },
                 )
                 LlmAuthTab.LOCAL -> LocalTabContent(
                     selectedLocalModel = selectedLocalModel,
@@ -257,29 +213,13 @@ internal fun LlmAuthSettingsPage(
     }
 }
 
-/**
- * Section 5 canonicalization rule: `selectedProviderForTab` derivation.
- * - If [selectedModel]'s provider matches [tab]'s mode → use that provider.
- * - Else → [tab]'s default provider.
- */
-private fun resolveProviderForTab(
-    tab: LlmAuthTab,
-    selectedModel: String,
-    modelCatalog: ModelCatalog,
-): LLMProvider {
+private fun resolveProviderForTab(tab: LlmAuthTab, selectedModel: String, modelCatalog: ModelCatalog): LLMProvider {
     val modelProvider = modelCatalog.resolveOrNull(selectedModel)?.provider
-    return if (modelProvider != null && modelProvider.mode == tab.mode) modelProvider
-    else tab.defaultProvider
+    return if (modelProvider != null && modelProvider.mode == tab.mode) modelProvider else tab.defaultProvider
 }
 
 private const val API_KEY_PERSIST_DEBOUNCE_MS = 300L
 
-/**
- * Debounce + single-flight + FIFO mutex for per-keystroke AuthStore writes.
- * Cancels the previous pending write; the mutex guarantees that any write that
- * already passed the debounce completes in launch order, so the final keystroke
- * always wins even though [AuthStore.set] has no internal write lock.
- */
 internal fun launchDebouncedApiKeyPersist(
     scope: CoroutineScope,
     authStore: AuthStore,
@@ -295,21 +235,12 @@ internal fun launchDebouncedApiKeyPersist(
         delay(debounceMs)
         mutex.withLock {
             withContext(ioContext) {
-                if (key.isBlank()) authStore.clear(provider)
-                else authStore.set(provider, AuthCredential.ApiKey(key))
+                if (key.isBlank()) authStore.clear(provider) else authStore.set(provider, AuthCredential.ApiKey(key))
             }
         }
     }
 }
 
-/**
- * Debounce + single-flight launcher for non-AuthStore persistence (OTHER base URL,
- * custom model id). Writes hit a SharedPreferences-backed store; they're cheap and
- * already coalesce, so the per-keystroke cancel-the-pending-write pattern is enough
- * — no mutex needed. The persist action runs on the caller's scope dispatcher
- * (Main.immediate from `rememberCoroutineScope()`), which is required for the
- * downstream Compose `mutableStateOf` writes inside [AppSettingsState].
- */
 internal fun launchDebouncedPersist(
     scope: CoroutineScope,
     pending: Array<Job?>,
@@ -317,10 +248,7 @@ internal fun launchDebouncedPersist(
     action: suspend () -> Unit,
 ) {
     pending[0]?.cancel()
-    pending[0] = scope.launch {
-        delay(debounceMs)
-        action()
-    }
+    pending[0] = scope.launch { delay(debounceMs); action() }
 }
 
 @Composable
@@ -333,25 +261,12 @@ private fun SignInTabContent(
     onCancelOAuth: () -> Unit,
     onSignOut: () -> Unit
 ) {
-    // Canonical provider for this tab: selected model if OAuth-mode, else OPENAI_CODEX.
     val provider = resolveProviderForTab(LlmAuthTab.SIGN_IN, selectedModel, modelCatalog)
     val modelOptions = catalogModelOptions(modelCatalog.modelsFor(provider))
-
-    SettingsSection(title = "Cloud Model") {
-        CloudModelDropdown(
-            selectedModel = selectedModel,
-            modelOptions = modelOptions,
-            onModelChange = onModelChange
-        )
-    }
+    SettingsSection(title = "Cloud Model") { CloudModelDropdown(selectedModel, modelOptions, onModelChange) }
     Spacer(modifier = Modifier.height(20.dp))
     SettingsSection(title = "Authentication") {
-        OpenAiAuthCard(
-            state = openAiAuthUiState,
-            onStartOAuth = onStartOAuth,
-            onCancelOAuth = onCancelOAuth,
-            onSignOut = onSignOut
-        )
+        OpenAiAuthCard(state = openAiAuthUiState, onStartOAuth = onStartOAuth, onCancelOAuth = onCancelOAuth, onSignOut = onSignOut)
     }
 }
 
@@ -369,85 +284,44 @@ private fun ApiKeyTabContent(
     otherModelId: String,
     initialProvider: LLMProvider? = null,
 ) {
-    // Canonical provider rule — re-derives whenever the external model changes.
-    // Explicit deep-link target wins on first composition.
     val derivedProvider = resolveProviderForTab(LlmAuthTab.API_KEY, selectedModel, modelCatalog)
     var selectedProvider by rememberSaveable(derivedProvider, initialProvider) {
-        val start = initialProvider?.takeIf { it in API_KEY_PROVIDERS } ?: derivedProvider
-        mutableStateOf(start)
+        mutableStateOf(initialProvider?.takeIf { it in API_KEY_PROVIDERS } ?: derivedProvider)
     }
-
     val modelOptions = catalogModelOptions(modelCatalog.modelsFor(selectedProvider))
-
-    // Per-provider API key text, seeded from AuthStore. Process-transient for typing;
-    // blur/change invokes onApiKeyPersist to write through to AuthStore.
     var apiKeyText by remember(selectedProvider) { mutableStateOf("") }
-    LaunchedEffect(selectedProvider) {
-        val cred = authStore.get(selectedProvider)
-        apiKeyText = (cred as? AuthCredential.ApiKey)?.key.orEmpty()
-    }
-
-    // OTHER-specific text: editable in-place; debounced through onOtherBaseUrlPersist
-    // and onOtherModelIdPersist, which write to AppSettingsStore and invalidate the
-    // ModelCatalogRepository (so `modelCatalog` recomposes with the synth entry).
+    LaunchedEffect(selectedProvider) { apiKeyText = (authStore.get(selectedProvider) as? AuthCredential.ApiKey)?.key.orEmpty() }
     var otherBaseUrlText by remember(otherBaseUrl) { mutableStateOf(otherBaseUrl) }
     var otherModelIdText by remember(otherModelId) { mutableStateOf(otherModelId) }
 
-    // Provider sub-selector — local view state only, no settings writes on click.
     SettingsSection(title = "Provider") {
         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
             API_KEY_PROVIDERS.forEachIndexed { index, provider ->
                 SegmentedButton(
                     selected = selectedProvider == provider,
                     onClick = { selectedProvider = provider },
-                    shape = SegmentedButtonDefaults.itemShape(
-                        index = index,
-                        count = API_KEY_PROVIDERS.size
-                    ),
-                    // Drop the default leading-checkmark slot: "OpenRouter" truncates
-                    // when the icon eats into the (already weight-distributed) cell.
-                    // The pill background + label weight already signal selection.
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = API_KEY_PROVIDERS.size),
                     icon = {},
-                ) {
-                    Text(provider.displayLabel)
-                }
+                ) { Text(provider.displayLabel) }
             }
         }
     }
-
     Spacer(modifier = Modifier.height(20.dp))
 
     if (selectedProvider == LLMProvider.OTHER) {
         SettingsSection(title = "Base URL") {
-            OtherBaseUrlField(
-                value = otherBaseUrlText,
-                onValueChange = { value ->
-                    otherBaseUrlText = value
-                    onOtherBaseUrlPersist(value)
-                },
-            )
+            OtherBaseUrlField(otherBaseUrlText) { value -> otherBaseUrlText = value; onOtherBaseUrlPersist(value) }
         }
         Spacer(modifier = Modifier.height(20.dp))
-
         SettingsSection(title = "Custom Model Id") {
-            OtherModelIdField(
-                value = otherModelIdText,
-                onValueChange = { value ->
-                    otherModelIdText = value
-                    onOtherModelIdPersist(value)
-                },
-            )
+            OtherModelIdField(otherModelIdText) { value -> otherModelIdText = value; onOtherModelIdPersist(value) }
         }
         Spacer(modifier = Modifier.height(20.dp))
     }
 
     SettingsSection(title = "Cloud Model") {
         if (selectedProvider == LLMProvider.OPENROUTER || selectedProvider == LLMProvider.OTHER) {
-            SearchableGroupedModelPicker(
-                entries = modelCatalog.modelsFor(selectedProvider),
-                selectedName = selectedModel,
-                onSelect = onModelChange,
-            )
+            SearchableGroupedModelPicker(entries = modelCatalog.modelsFor(selectedProvider), selectedName = selectedModel, onSelect = onModelChange)
             Spacer(modifier = Modifier.height(8.dp))
             val pickerContext = LocalContext.current
             val repo = remember(pickerContext) { ModelCatalogRepositoryHolder.get(pickerContext) }
@@ -460,32 +334,20 @@ private fun ApiKeyTabContent(
                 discoveryState = discoveryState,
                 allowDebugHttp = BuildConfig.DEBUG,
                 onRefresh = {
-                    // Pass the LIVE typed URL to the repo, not the persisted
-                    // value: the 300ms persist debounce can lag the typed
-                    // text and would otherwise route the current key to the
-                    // STALE persisted URL (Codex review CRITICAL #1). For
-                    // OPENROUTER, the URL is seed-fixed.
                     val baseUrl = when (selectedProvider) {
                         LLMProvider.OPENROUTER -> LLMProvider.OPENROUTER.defaultBaseUrl.orEmpty()
-                        LLMProvider.OTHER ->
-                            OtherBaseUrlValidator.validate(otherBaseUrlText).getOrNull().orEmpty()
+                        LLMProvider.OTHER -> OtherBaseUrlValidator.validate(otherBaseUrlText).getOrNull().orEmpty()
                         else -> ""
                     }
-                    if (baseUrl.isBlank()) return@RefreshModelsRow
-                    refreshScope.launch { repo.refresh(selectedProvider, apiKeyText, baseUrl) }
+                    if (baseUrl.isNotBlank()) refreshScope.launch { repo.refresh(selectedProvider, apiKeyText, baseUrl) }
                 },
             )
         } else {
-            CloudModelDropdown(
-                selectedModel = selectedModel,
-                modelOptions = modelOptions,
-                onModelChange = onModelChange
-            )
+            CloudModelDropdown(selectedModel, modelOptions, onModelChange)
         }
     }
     Spacer(modifier = Modifier.height(20.dp))
 
-    // Provider-linked API key field — value backed by AuthStore.
     SettingsSection(title = "API Key") {
         val label = when (selectedProvider) {
             LLMProvider.OPENAI_API -> "OpenAI Key"
@@ -494,52 +356,17 @@ private fun ApiKeyTabContent(
             LLMProvider.OPENAI_CODEX, LLMProvider.LOCAL_LFM -> null
         }
         if (label != null) {
-            ApiKeyField(
-                label = label,
-                value = apiKeyText,
-                onValueChange = { key ->
-                    apiKeyText = key
-                    onApiKeyPersist(selectedProvider, key)
-                }
-            )
+            ApiKeyField(label = label, value = apiKeyText, onValueChange = { key -> apiKeyText = key; onApiKeyPersist(selectedProvider, key) })
         }
     }
 
-    // Auto-flip rule: when the user is in the OTHER sub-tab and all three fields
-    // validate, flip selectedModel to "other-custom". Logic lives in
-    // [shouldAutoFlipToOtherCustom] so it's exercised by a plain JVM unit test —
-    // the @Composable wiring here is a thin recomputation harness.
-    LaunchedEffect(
-        selectedProvider,
-        otherBaseUrlText,
-        otherModelIdText,
-        apiKeyText,
-        modelCatalog,
-        selectedModel,
-    ) {
-        if (shouldAutoFlipToOtherCustom(
-                selectedProvider = selectedProvider,
-                apiKeyText = apiKeyText,
-                otherBaseUrlText = otherBaseUrlText,
-                otherModelIdText = otherModelIdText,
-                modelCatalog = modelCatalog,
-                selectedModel = selectedModel,
-            )
-        ) {
+    LaunchedEffect(selectedProvider, otherBaseUrlText, otherModelIdText, apiKeyText, modelCatalog, selectedModel) {
+        if (shouldAutoFlipToOtherCustom(selectedProvider, apiKeyText, otherBaseUrlText, otherModelIdText, modelCatalog, selectedModel)) {
             onModelChange(ModelCatalogRepository.OTHER_CUSTOM_NAME)
         }
     }
 }
 
-/**
- * Decide whether the OTHER auto-flip should fire right now. Pure function; exposed
- * `internal` so the JVM regression test can pin the stale-catalog race fix
- * (Sub 1c Codex review HIGH #1) without spinning up Compose.
- *
- * Gates the flip on the catalog entry MATCHING the current normalized UI values
- * — a stale `other-custom` row from a previous valid config would otherwise let
- * a mid-edit launch hit the old endpoint with the new key.
- */
 internal fun shouldAutoFlipToOtherCustom(
     selectedProvider: LLMProvider,
     apiKeyText: String,
@@ -548,15 +375,12 @@ internal fun shouldAutoFlipToOtherCustom(
     modelCatalog: ModelCatalog,
     selectedModel: String,
 ): Boolean {
-    if (selectedProvider != LLMProvider.OTHER) return false
-    if (apiKeyText.isBlank()) return false
-    if (otherBaseUrlText.isBlank() || otherModelIdText.isBlank()) return false
+    if (selectedProvider != LLMProvider.OTHER || apiKeyText.isBlank() || otherBaseUrlText.isBlank() || otherModelIdText.isBlank()) return false
     val normalizedUrl = OtherBaseUrlValidator.validate(otherBaseUrlText).getOrNull() ?: return false
     val trimmedModelId = ModelIdValidator.validate(otherModelIdText).getOrNull() ?: return false
     val entry = modelCatalog.resolveOrNull(ModelCatalogRepository.OTHER_CUSTOM_NAME) ?: return false
     if (entry.baseUrl != normalizedUrl || entry.modelId != trimmedModelId) return false
-    if (selectedModel == ModelCatalogRepository.OTHER_CUSTOM_NAME) return false
-    return true
+    return selectedModel != ModelCatalogRepository.OTHER_CUSTOM_NAME
 }
 
 @Composable
@@ -565,14 +389,41 @@ private fun LocalTabContent(
     onLocalModelChange: (LocalModelOption) -> Unit,
     modelLoadingStatus: ModelLoadingStatus
 ) {
+    val context = LocalContext.current
+    var showGgufDiagnostics by rememberSaveable { mutableStateOf(false) }
+
+    if (showGgufDiagnostics) {
+        val settingsStore = remember(context) { ai.closepaw.llm.gguf.GgufSettingsStore(context) }
+        val engine = remember(context) { ai.closepaw.llm.gguf.GgufLlmEngine(context) }
+        GgufDiagnosticPage(
+            settingsStore = settingsStore,
+            engine = engine,
+            onNavigateBack = { showGgufDiagnostics = false },
+            modifier = Modifier.fillMaxWidth()
+        )
+        return
+    }
+
+    SettingsSection(title = "GGUF diagnostics") {
+        Column(verticalArrangement = Arrangement.spacedBy(MaterialTheme.closePaw.spacing.sm)) {
+            Text(
+                text = "Test a local GGUF model with the embedded llama.cpp engine.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Button(onClick = { showGgufDiagnostics = true }) {
+                Text("Open GGUF Diagnostic UI")
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(20.dp))
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.errorContainer,
         shape = MaterialTheme.shapes.medium
     ) {
         Text(
-            text = "Experimental: local models are slow and underpowered, " +
-                "and will not reliably drive the agent. Use a cloud model for real work.",
+            text = "Experimental: local models are slow and underpowered, and will not reliably drive the agent. Use a cloud model for real work.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onErrorContainer,
             modifier = Modifier.padding(MaterialTheme.closePaw.spacing.md)
@@ -581,19 +432,12 @@ private fun LocalTabContent(
     Spacer(modifier = Modifier.height(16.dp))
     SettingsSection(title = "Local Model") {
         Column(verticalArrangement = Arrangement.spacedBy(MaterialTheme.closePaw.spacing.md)) {
-            LocalModelDropdown(
-                selectedModelId = selectedLocalModel,
-                onModelChange = onLocalModelChange
-            )
+            LocalModelDropdown(selectedModelId = selectedLocalModel, onModelChange = onLocalModelChange)
             ModelLoadingStatusIndicator(status = modelLoadingStatus)
         }
     }
 }
 
-/**
- * Replace the current main model with the preferred one for [provider] if it isn't
- * valid for the new context.
- */
 private fun canonicalizeMainModel(
     modelCatalog: ModelCatalog,
     provider: LLMProvider,
@@ -603,10 +447,7 @@ private fun canonicalizeMainModel(
 ) {
     val validModels = modelCatalog.modelsFor(provider, api)
     val validNames = validModels.map { it.name }.toSet()
-    if (selectedModel !in validNames) {
-        val preferred = validModels.firstOrNull()
-        if (preferred != null) onModelChange(preferred.name)
-    }
+    if (selectedModel !in validNames) validModels.firstOrNull()?.let { onModelChange(it.name) }
 }
 
 @Composable
@@ -617,21 +458,13 @@ private fun OtherBaseUrlField(value: String, onValueChange: (String) -> Unit) {
         onValueChange = onValueChange,
         modifier = Modifier.fillMaxWidth(),
         label = { Text("Base URL") },
-        placeholder = {
-            Text(
-                "https://api.example.com/v1",
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-            )
-        },
-        singleLine = true,
+        placeholder = { Text("https://api.example.com/v1") },
         isError = error != null,
-        supportingText = error?.let { message ->
-            { Text(message) }
-        },
-        shape = MaterialTheme.shapes.small,
+        supportingText = { if (error != null) Text(error) },
+        singleLine = true,
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = MaterialTheme.colorScheme.primary,
-            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+            focusedLabelColor = MaterialTheme.colorScheme.primary,
         ),
     )
 }
@@ -644,21 +477,13 @@ private fun OtherModelIdField(value: String, onValueChange: (String) -> Unit) {
         onValueChange = onValueChange,
         modifier = Modifier.fillMaxWidth(),
         label = { Text("Custom Model Id") },
-        placeholder = {
-            Text(
-                "vendor/model-id",
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-            )
-        },
-        singleLine = true,
+        placeholder = { Text("model-id") },
         isError = error != null,
-        supportingText = error?.let { message ->
-            { Text(message) }
-        },
-        shape = MaterialTheme.shapes.small,
+        supportingText = { if (error != null) Text(error) },
+        singleLine = true,
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = MaterialTheme.colorScheme.primary,
-            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+            focusedLabelColor = MaterialTheme.colorScheme.primary,
         ),
     )
 }
