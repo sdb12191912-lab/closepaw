@@ -35,12 +35,17 @@ jobs:
           glslc --version
           test -f /usr/include/vulkan/vulkan.hpp
 
+      - name: Stage Vulkan headers into Android NDK sysroot
+        run: |
+          NDK_SYSROOT="$ANDROID_HOME/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          sudo mkdir -p "$NDK_SYSROOT/usr/include/vulkan"
+          sudo cp -a /usr/include/vulkan/. "$NDK_SYSROOT/usr/include/vulkan/"
+          test -f "$NDK_SYSROOT/usr/include/vulkan/vulkan.hpp"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build Debug APK
-        env:
-          CPLUS_INCLUDE_PATH: /usr/include
         run: ./gradlew assembleDebug
 
       - name: Upload Debug APK Artifact
