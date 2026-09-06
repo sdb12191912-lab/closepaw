@@ -30,6 +30,13 @@ class MobileActionTool : ToolSpec {
     override val description: String = """
 Perform touch interactions on the device screen.
 
+Navigation reliability rules:
+- Treat a user-provided route such as "App / Settings / Wallet" or "App → Settings → Wallet" as ordered waypoints. Complete them in that order; do not replace the route with search unless the requested waypoint is unavailable.
+- After every click, long press, type, scroll, or swipe, use the returned fresh screen observation before choosing the next target. Element indices and coordinates from an older screen may be stale.
+- Prefer current visible text or element_index over raw coordinates. If a gesture fallback is marked [unverified], do not assume the requested UI action succeeded; inspect the fresh observation and choose the target again.
+- Do not repeat the same click on an unchanged screen. Re-resolve the element from the latest observation or try a different visible target.
+- For text entry, prefer a current editable element_index/text. If the field is not exposed as editable, tap it to focus, then call type without a target so the focused field can be used.
+
 Targeting (click, long_press, type): prefer element_index, then text, then x/y coordinates. If multiple target fields are supplied, element_index is primary, text is a label hint, and x/y is only a fallback coordinate hint.
 
 Actions:
@@ -46,7 +53,6 @@ Actions:
         val action = params.optString("action", "")
         if (action.isEmpty()) return ValidationResult.Invalid("Missing required parameter: action")
 
-        // Reject legacy bounds selector — removed in v2 design
         if (params.has("x1") || params.has("y1") || params.has("x2") || params.has("y2")) {
             return ValidationResult.Invalid(
                 "Bounds selector (x1/y1/x2/y2) is no longer supported. " +
@@ -99,14 +105,6 @@ Actions:
         }
     }
 
-    // ============================================================
-    // Validation: canonical target normalization
-    // ============================================================
-    //
-    // Targets are canonicalized by priority: element_index, then text, then x/y.
-    // x/y may accompany a semantic target as a fallback coordinate hint.
-    // Bare x/y is allowed for click/long_press/type, but not for scroll.
-
     private fun validateTargetedAction(
         params: JSONObject, action: String, required: Boolean
     ): ValidationResult {
@@ -139,7 +137,6 @@ Actions:
         if (!params.has("input_text")) {
             return ValidationResult.Invalid("type action requires input_text")
         }
-        // Type allows no target (types into focused field)
         return validateTargetedAction(params, "type", required = false)
     }
 
@@ -156,7 +153,6 @@ Actions:
         val hasText = params.optString("text", "").trim().isNotEmpty()
         val hasAnyCoord = params.has("x") || params.has("y")
 
-        // Scroll is area-based; bare coordinates have no scrollable to operate on.
         if (hasAnyCoord && !hasElement && !hasText) {
             return ValidationResult.Invalid(
                 "scroll does not accept bare x/y. Provide element_index or text; x/y is only a coordinate hint for a semantic target."
@@ -210,10 +206,6 @@ Actions:
         }
         return ValidationResult.Valid
     }
-
-    // ============================================================
-    // Target parsing + description building
-    // ============================================================
 
     private fun parseOptionalTarget(params: JSONObject): Target? {
         val hint = if (params.has("x") && params.has("y")) {
@@ -269,10 +261,6 @@ Actions:
         }
     }
 
-    // ============================================================
-    // Schema
-    // ============================================================
-
     private fun buildSchema(): JSONObject {
         val properties = JSONObject().apply {
             put("agent_thought", JSONObject().apply {
@@ -286,11 +274,11 @@ Actions:
             })
             put("element_index", JSONObject().apply {
                 put("type", "integer")
-                put("description", "Index from current screen state. Primary target when supplied, including when text/x/y are also present.")
+                put("description", "Index from the CURRENT screen observation only. Never reuse an index after the screen changes.")
             })
             put("text", JSONObject().apply {
                 put("type", "string")
-                put("description", "Target element by visible text. Used when element_index is absent; otherwise treated as a label hint.")
+                put("description", "Target element by visible text on the CURRENT screen. Prefer this over raw coordinates when possible.")
             })
             put("text_index", JSONObject().apply {
                 put("type", "integer")
@@ -298,11 +286,11 @@ Actions:
             })
             put("x", JSONObject().apply {
                 put("type", "integer")
-                put("description", "Target X coordinate in pixels")
+                put("description", "Target X coordinate in pixels. Use only from the current screen; coordinates become stale after navigation.")
             })
             put("y", JSONObject().apply {
                 put("type", "integer")
-                put("description", "Target Y coordinate in pixels")
+                put("description", "Target Y coordinate in pixels. Use only from the current screen; coordinates become stale after navigation.")
             })
             put("input_text", JSONObject().apply {
                 put("type", "string")
