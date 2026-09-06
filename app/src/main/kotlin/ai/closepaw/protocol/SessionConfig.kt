@@ -10,8 +10,8 @@ import ai.closepaw.perception.PerceptionConfig
  * Immutable after session creation.
  */
 data class SessionConfig(
-        /** Delay between actions in milliseconds (for UI to settle) */
-        val actionDelayMs: Long = 2000,
+        /** Delay between actions in milliseconds (for UI to settle). */
+        val actionDelayMs: Long = 3000,
         /** Approval mode for tool execution */
         val approvalMode: ApprovalMode = ApprovalMode.SMART,
         /**
@@ -23,13 +23,13 @@ data class SessionConfig(
                         localConfig = null
                 ),
         /** Enable verbose debug logging */
-        val debugMode: Boolean = false,
+        val debugMode: Boolean = true,
         /** Persist a full JSONL trace (for inspection_tool) */
-        val traceEnabled: Boolean = false,
+        val traceEnabled: Boolean = true,
         /** Trace run id (folder name) for correlating host/device artifacts */
         val traceRunId: String? = null,
         /** Controls which perception modalities (a11y tree, screenshot, both) are active */
-        val perceptionConfig: PerceptionConfig = PerceptionConfig.DEFAULT,
+        val perceptionConfig: PerceptionConfig = PerceptionConfig.Hybrid(),
         /**
          * Primary model name (key in llm_models.json) for the main agent.
          * Subagents inherit this model — there is no separate subagent model.
