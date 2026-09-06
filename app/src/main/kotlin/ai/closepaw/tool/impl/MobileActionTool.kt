@@ -18,10 +18,14 @@ import org.json.JSONObject
  * Implements ToolSpec directly. No base class, no ActionHandler indirection.
  * Validation is inline; execution is delegated to per-action executors.
  *
- * Targeting is canonicalized by priority: element_index, then text, then x/y.
+ * Targeting is canonicalized by priority: valid element_index, then text, then x/y.
  * Extra target fields are treated as hints. x/y may accompany a semantic
  * target as a fallback coordinate hint. Bare x/y is allowed for click/
  * long_press/type, but scroll rejects it because scroll is area-based.
+ *
+ * A negative element_index emitted by an LLM is treated as "no element target"
+ * when a valid text or coordinate target is also present. This makes coordinate
+ * fallback robust instead of failing validation on sentinel values such as -1.
  */
 class MobileActionTool : ToolSpec {
 
@@ -33,11 +37,12 @@ Perform touch interactions on the device screen.
 Navigation reliability rules:
 - Treat a user-provided route such as "App / Settings / Wallet" or "App → Settings → Wallet" as ordered waypoints. Complete them in that order; do not replace the route with search unless the requested waypoint is unavailable.
 - After every click, long press, type, scroll, or swipe, use the returned fresh screen observation before choosing the next target. Element indices and coordinates from an older screen may be stale.
-- Prefer current visible text or element_index over raw coordinates. If a gesture fallback is marked [unverified], do not assume the requested UI action succeeded; inspect the fresh observation and choose the target again.
+- Prefer current visible text or a valid current element_index over raw coordinates. If a gesture fallback is marked [unverified], do not assume the requested UI action succeeded; inspect the fresh observation and choose the target again.
 - Do not repeat the same click on an unchanged screen. Re-resolve the element from the latest observation or try a different visible target.
 - For text entry, prefer a current editable element_index/text. If the field is not exposed as editable, tap it to focus, then call type without a target so the focused field can be used.
+- Never send element_index=-1 as the target. If no valid element index exists and coordinates are known, omit element_index and use x/y only.
 
-Targeting (click, long_press, type): prefer element_index, then text, then x/y coordinates. If multiple target fields are supplied, element_index is primary, text is a label hint, and x/y is only a fallback coordinate hint.
+Targeting (click, long_press, type): prefer a valid element_index (>=0), then text, then x/y coordinates. If multiple target fields are supplied, a valid element_index is primary, text is a label hint, and x/y is only a fallback coordinate hint. A negative element_index is ignored when another valid target is present.
 
 Actions:
 - click: Tap element
@@ -105,20 +110,45 @@ Actions:
         }
     }
 
+    private fun hasValidElementIndex(params: JSONObject): Boolean =
+        params.has("element_index") && params.optInt("element_index", -1) >= 0
+
+    private fun hasInvalidElementIndex(params: JSONObject): Boolean =
+        params.has("element_index") && params.optInt("element_index", -1) < 0
+
+    private fun hasTextTarget(params: JSONObject): Boolean =
+        params.optString("text", "").trim().isNotEmpty()
+
+    private fun hasCompleteCoordinates(params: JSONObject): Boolean =
+        params.has("x") && params.has("y") && params.optInt("x", -1) >= 0 && params.optInt("y", -1) >= 0
+
     private fun validateTargetedAction(
         params: JSONObject, action: String, required: Boolean
     ): ValidationResult {
-        val hasElement = params.has("element_index")
-        val hasText = params.optString("text", "").trim().isNotEmpty()
+        val hasElement = hasValidElementIndex(params)
+        val hasText = hasTextTarget(params)
         val hasAnyCoord = params.has("x") || params.has("y")
+        val hasCoordinates = hasCompleteCoordinates(params)
 
-        if (!hasElement && !hasText && !hasAnyCoord && required) {
-            return ValidationResult.Invalid(
-                "$action requires one of: element_index, text, or x/y coordinates"
-            )
+        if (!hasElement && !hasText && !hasCoordinates && required) {
+            return if (hasInvalidElementIndex(params)) {
+                ValidationResult.Invalid(
+                    "$action has element_index < 0 and no valid fallback target. " +
+                        "Omit element_index and provide text or valid x/y coordinates."
+                )
+            } else {
+                ValidationResult.Invalid(
+                    "$action requires one of: element_index >= 0, text, or x/y coordinates"
+                )
+            }
         }
 
-        validateElementIndex(params)?.let { return it }
+        // Negative element_index is a common LLM sentinel for "no semantic target".
+        // Ignore it when another valid target exists; only reject it when it is the sole target.
+        if (hasInvalidElementIndex(params) && !hasText && !hasCoordinates) {
+            return ValidationResult.Invalid("element_index must be >= 0 when used as the only target")
+        }
+
         validateCoordinates(params, action)?.let { return it }
         if (params.has("text_index") && !hasText && !hasElement && !hasAnyCoord) {
             return ValidationResult.Invalid("text_index requires text")
@@ -149,28 +179,27 @@ Actions:
             return ValidationResult.Invalid("direction must be one of: up, down, left, right")
         }
 
-        val hasElement = params.has("element_index")
-        val hasText = params.optString("text", "").trim().isNotEmpty()
+        val hasElement = hasValidElementIndex(params)
+        val hasText = hasTextTarget(params)
         val hasAnyCoord = params.has("x") || params.has("y")
 
         if (hasAnyCoord && !hasElement && !hasText) {
             return ValidationResult.Invalid(
-                "scroll does not accept bare x/y. Provide element_index or text; x/y is only a coordinate hint for a semantic target."
+                "scroll does not accept bare x/y. Provide element_index >= 0 or text; x/y is only a coordinate hint for a semantic target."
             )
         }
 
-        validateElementIndex(params)?.let { return it }
+        if (hasInvalidElementIndex(params) && !hasText) {
+            return ValidationResult.Invalid(
+                "scroll ignores negative element_index only when a valid text target is present"
+            )
+        }
+
         validateCoordinates(params, "scroll")?.let { return it }
         if (params.has("text_index") && !hasText && !hasElement) {
             return ValidationResult.Invalid("text_index requires text")
         }
         return ValidationResult.Valid
-    }
-
-    private fun validateElementIndex(params: JSONObject): ValidationResult.Invalid? {
-        if (!params.has("element_index")) return null
-        val idx = params.optInt("element_index", -1)
-        return if (idx < 0) ValidationResult.Invalid("element_index must be >= 0") else null
     }
 
     private fun validateCoordinates(params: JSONObject, action: String): ValidationResult.Invalid? {
@@ -208,14 +237,14 @@ Actions:
     }
 
     private fun parseOptionalTarget(params: JSONObject): Target? {
-        val hint = if (params.has("x") && params.has("y")) {
+        val hint = if (hasCompleteCoordinates(params)) {
             Target.Coordinate(params.getInt("x"), params.getInt("y"))
         } else null
 
         return when {
-            params.has("element_index") ->
+            hasValidElementIndex(params) ->
                 Target.ElementIndex(params.getInt("element_index"), hint)
-            params.optString("text", "").trim().isNotEmpty() ->
+            hasTextTarget(params) ->
                 Target.Text(params.getString("text"), params.optInt("text_index", 0), hint)
             hint != null -> hint
             else -> null
@@ -274,7 +303,8 @@ Actions:
             })
             put("element_index", JSONObject().apply {
                 put("type", "integer")
-                put("description", "Index from the CURRENT screen observation only. Never reuse an index after the screen changes.")
+                put("minimum", 0)
+                put("description", "Optional index from the CURRENT screen observation only. Omit this field if no valid element index exists; never send -1. Never reuse an index after the screen changes.")
             })
             put("text", JSONObject().apply {
                 put("type", "string")
@@ -282,15 +312,18 @@ Actions:
             })
             put("text_index", JSONObject().apply {
                 put("type", "integer")
+                put("minimum", 0)
                 put("description", "Zero-based index when multiple elements match text (default 0)")
             })
             put("x", JSONObject().apply {
                 put("type", "integer")
-                put("description", "Target X coordinate in pixels. Use only from the current screen; coordinates become stale after navigation.")
+                put("minimum", 0)
+                put("description", "Target X coordinate in pixels. Use only from the current screen; coordinates become stale after navigation. If using coordinate-only targeting, omit element_index entirely.")
             })
             put("y", JSONObject().apply {
                 put("type", "integer")
-                put("description", "Target Y coordinate in pixels. Use only from the current screen; coordinates become stale after navigation.")
+                put("minimum", 0)
+                put("description", "Target Y coordinate in pixels. Use only from the current screen; coordinates become stale after navigation. If using coordinate-only targeting, omit element_index entirely.")
             })
             put("input_text", JSONObject().apply {
                 put("type", "string")
@@ -308,15 +341,17 @@ Actions:
             put("start", JSONObject().apply {
                 put("type", "array")
                 put("description", "Swipe start coordinate [x, y] in pixels (swipe action only)")
-                put("items", JSONObject().put("type", "integer"))
+                put("items", JSONObject().put("type", "integer").put("minimum", 0))
             })
             put("end", JSONObject().apply {
                 put("type", "array")
                 put("description", "Swipe end coordinate [x, y] in pixels (swipe action only)")
-                put("items", JSONObject().put("type", "integer"))
+                put("items", JSONObject().put("type", "integer").put("minimum", 0))
             })
             put("duration_ms", JSONObject().apply {
                 put("type", "integer")
+                put("minimum", 0)
+                put("maximum", 30000)
                 put("description", "Duration in ms: hold time for long_press (default 1000), gesture time for swipe (default 400)")
             })
         }
