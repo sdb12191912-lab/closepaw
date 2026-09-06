@@ -135,7 +135,7 @@ internal suspend fun executePointAction(
     }
 
     return ActionOutcome.Failed(
-        reason = if (attemptTrail.any { it.contains("no observable effect") }) {
+        reason = if (attemptTrail.any { it.contains("no observable effect", ignoreCase = true) }) {
             formatActionMessage(
                 "${actionName.replace('_', ' ').replaceFirstChar { it.uppercase() }} at " +
                     "(${point.x},${point.y}) had no observable effect after all channels",
@@ -180,6 +180,20 @@ private suspend fun buildPointActionOutcome(
         addAll(resolvedWarnings)
         addAll(analysis.warnings)
     }
+
+    // A dispatched gesture/node click is not considered successful unless we can
+    // observe a resulting UI transition. This prevents the agent from treating a
+    // no-op tap as progress and then continuing with stale assumptions/indexes.
+    if (analysis.changeResult == UiChangeDetector.ChangeResult.Unchanged) {
+        return ActionOutcome.Failed(
+            reason = formatActionMessage(
+                "$actionName at (${point.x},${point.y}) via $channelName had no observable effect",
+                allWarnings
+            ),
+            attemptTrail = attemptTrail
+        )
+    }
+
     return ActionOutcome.Success(
         message = formatSuccess(point, channelName, allWarnings),
         observation = analysis.observation,
