@@ -16,13 +16,12 @@ set(GGML_OPENMP OFF CACHE BOOL "Disable OpenMP on Android" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "Disable llamafile kernels on Android" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "Do not pin one host CPU ISA" FORCE)
 
-# Build CPU variants when supported by this pinned llama.cpp revision.
-set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "Build all Android CPU variants" FORCE)
-
-# Keep static linking for now. The pinned b4832 revision requires
-# BUILD_SHARED_LIBS=ON for GGML_BACKEND_DL, while our JNI integration is
-# intentionally static to avoid conflicts with the existing Leap libllama.so.
-# Dynamic backend loading will be revisited together with a newer llama.cpp.
+# Keep CPU backend compatible with the pinned static llama.cpp build.
+# This pinned revision requires GGML_BACKEND_DL for GGML_CPU_ALL_VARIANTS,
+# while our JNI integration intentionally keeps static linking to avoid
+# collisions with the existing Leap libllama.so. Therefore use the generic
+# CPU backend instead of CPU_ALL_VARIANTS.
+set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "Disable CPU variants on pinned static Android build" FORCE)
 set(GGML_BACKEND_DL OFF CACHE BOOL "Disable dynamic GGML backend loading on pinned static build" FORCE)
 
 # Vulkan backend. llama.cpp keeps CPU fallback available.
